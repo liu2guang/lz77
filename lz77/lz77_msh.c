@@ -1,206 +1,136 @@
-/***************************************************************************
- *          Lempel, Ziv Encoding and Decoding
- *
- *   File    : main.c
- *   Authors : David Costa and Pietro De Rosa
- *
- *                              DESCRIPTION
- *
- *   LZ77 is a lossless data compression algorithms published by Abraham
- *   Lempel and Jacob Ziv in 1977. It is a dictionary coder and maintains a
- *   sliding window during compression. The sliding window is divided in two
- *   parts: Search-Buffer (dictionary - encoded data) and Lookahead (uncomp-
- *   ressed data). LZ77 algorithms achieve compression by addressing byte
- *   sequences from former contents instead of the original data. All data
- *   will be coded in the same form (called token): -Address to already
- *   coded contents; -Sequence length; -First deviating symbol.
- *   The window is contained in a fixed size buffer.
- *   The match between SB and LA is made by a binary tree, implemented in an
- *   array.
- ***************************************************************************/
-
-/***************************************************************************
- *                             INCLUDED FILES
- ***************************************************************************/
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include "getopt.h"
-#include "bitio.h"
-#include "lz77.h"
+
 #include "rtthread.h"
+#include "lz77.h" 
+#include "finsh.h"
 
-/***************************************************************************
- *                                CONSTANTS
- ***************************************************************************/
-#define MIN_LA_SIZE 2       /* min lookahead size */
-#define MAX_LA_SIZE 255     /* max lookahead size */
-#define MIN_SB_SIZE 0       /* min search buffer size */
-#define MAX_SB_SIZE 65535   /* max search buffer size */
+#define LZ77_PRINT(fmt, ...)              \
+do{                                       \
+    rt_kprintf(fmt, ##__VA_ARGS__);       \
+}while(0)
 
-/***************************************************************************
- *                            TYPE DEFINITIONS
- ***************************************************************************/
-typedef enum
+#define LZ77_INFO(fmt, ...)               \
+do{                                       \
+    rt_kprintf("[\033[32mLZ77\033[0m] "); \
+    rt_kprintf(fmt, ##__VA_ARGS__);       \
+}while(0)
+
+/* 加密窗口 */
+#define MIN_LA_SIZE 2 
+#define MAX_LA_SIZE 255 
+
+/* 搜索窗口 */ 
+#define MIN_SB_SIZE 1 
+#define MAX_SB_SIZE 65535 
+
+/* 窗口大小: -1默认la=15, sb=4096 */ 
+int la_size = -1; 
+int sb_size = -1;
+
+int lz77(int argc, char *argv[]) 
 {
-    ENCODE,
-    DECODE
-} MODES;
-
-/***************************************************************************
- *                            USER INTERFACE
- * Syntax: ./lz77 <options>
- * Options: -c: compression mode
- *          -d: decompression mode
- *          -i <filename>: input file
- *          -o <filename>: output file
- *          -l <value> : lookahead size (default 15)
- *          -s <value> : search-buffer size (default 4095)
- *          -h: help
- ***************************************************************************/
-int lz77_main(int argc, char *argv[])
-{
-    /* variables */
-    int opt;
-    FILE *file = NULL;
-    struct bitFILE *bitF = NULL;
-    MODES mode = -1;
-    char *filenameIn = NULL, *filenameOut = NULL;
-    int la_size = -1, sb_size = -1; /* default size */
-
-    while ((opt = getopt(argc, argv, "cdi:o:l:s:h")) != -1)
+    FILE *file = RT_NULL;
+    struct bitFILE *bitF = RT_NULL; 
+    
+    const char *help_info[] = 
     {
-        switch (opt)
-        {
-        case 'c':       /* compression mode */
-            mode = ENCODE;
-            break;
-
-        case 'd':       /* decompression mode */
-            mode = DECODE;
-            break;
-
-        case 'i':       /* input file name */
-            if (filenameIn != NULL)
-            {
-                fprintf(stderr, "Multiple input files not allowed.\n");
-                goto error;
-            }
-            filenameIn = (char *)rt_malloc(strlen(optarg) + 1);
-            strcpy(filenameIn, optarg);
-
-            break;
-
-        case 'o':       /* output file name */
-            if (filenameOut != NULL)
-            {
-                fprintf(stderr, "Multiple output files not allowed.\n");
-                goto error;
-            }
-            filenameOut = (char *)rt_malloc(strlen(optarg) + 1);
-            strcpy(filenameOut, optarg);
-
-            break;
-
-        case 'l':       /* lookahead size */
-            la_size = atoi(optarg);
-            if (la_size < MIN_LA_SIZE || la_size > MAX_LA_SIZE)
-            {
-                fprintf(stderr, "Bad lookahead size value.\n");
-                goto error;
-            }
-            break;
-
-        case 's':       /* search-buffer size */
-            sb_size = atoi(optarg);
-            if (sb_size < MIN_SB_SIZE || sb_size > MAX_SB_SIZE)
-            {
-                fprintf(stderr, "Bad search-buffer size value.\n");
-                goto error;
-            }
-            break;
-
-        case 'h':       /* help */
-            printf("Usage: lz77 <options>\n");
-            printf("  -c : Encode input file to output file.\n");
-            printf("  -d : Decode input file to output file.\n");
-            printf("  -i <filename> : Name of input file.\n");
-            printf("  -o <filename> : Name of output file.\n");
-            printf("  -l <value> : Lookahead size (default 15)\n");
-            printf("  -s <value> : Search-buffer size (default 4095)\n");
-            printf("  -h : Command line options.\n\n");
-            return 0;
-        }
-    }
-
-    /* validate command line */
-    if (filenameIn == NULL)
+        [0] = "  -m     run mode, lz77 -m encode/decode <filename_in> <filename_out>.", 
+        [1] = "  -la    lookahead size(def 15), lz77 -la <2~255>.", 
+        [2] = "  -sb    search buf size(def 4096), lz77 -sb <1~65535>.",
+    }; 
+    
+    if(argc < 2)
     {
-        fprintf(stderr, "Input file must be provided\n");
-        goto error;
-    }
-    else if (filenameOut == NULL)
-    {
-        fprintf(stderr, "Output file must be provided\n");
-        goto error;
-    }
-
-    if (mode == ENCODE)
-    {
-        if ((file = fopen(filenameIn, "rb")) == NULL)
+        uint8_t index = 0;
+        LZ77_PRINT("\033[32mUsage: lz77 [-m] [-la] [-sb] \033[0m\n"); 
+        LZ77_PRINT("optional arguments: \n"); 
+        for(index = 0; index < (sizeof(help_info)/sizeof(char*)); index++)
         {
-            perror("Opening input file");
-            goto error;
+            LZ77_PRINT("%s\n", help_info[index]);
         }
-        if ((bitF = bitIO_open(filenameOut, BIT_IO_W)) == NULL)
-        {
-            perror("Opening output file");
-            goto error;
-        }
-        encode(file, bitF, la_size, sb_size);
-
-    }
-    else if (mode == DECODE)
-    {
-        if ((bitF = bitIO_open(filenameIn, BIT_IO_R)) == NULL)
-        {
-            perror("Opening input file");
-            goto error;
-        }
-        if ((file = fopen(filenameOut, "w")) == NULL)
-        {
-            perror("Opening output file");
-            goto error;
-        }
-        decode(bitF, file);
-
+        return RT_EOK; 
     }
     else
     {
-        fprintf(stderr, "Select ENCODE or DECODE mode\n");
-        goto error;
-    }
-
-    fclose(file);
-    bitIO_close(bitF);
-//    free(filenameIn);
-//    free(filenameOut); 
-    return 0;
-
-    /* handle error */
-error:
-    if (file != NULL)
-    {
-        fclose(file);
-    }
-    if (bitF != NULL)
-    {
-        bitIO_close(bitF);
+        if(!strcmp(argv[1], "-m")) 
+        {
+            if((!strcmp(argv[2], "e")) || (!strcmp(argv[2], "encode")))
+            {
+                if((file = fopen(argv[3], "rb")) == NULL)
+                {
+                    LZ77_INFO("open input file failed.\n");
+                    goto failed; 
+                }
+                if ((bitF = bitIO_open(argv[4], BIT_IO_W)) == NULL)
+                {
+                    LZ77_INFO("open output file failed.\n");
+                    goto failed; 
+                }
+                encode(file, bitF, la_size, sb_size); 
+            }
+            else if((!strcmp(argv[2], "d")) || (!strcmp(argv[2], "decode")))
+            {
+                if((bitF = bitIO_open(argv[3], BIT_IO_R)) == NULL)
+                {
+                    LZ77_INFO("open input file failed.\n");
+                    goto failed; 
+                }
+                if((file = fopen(argv[4], "w")) == NULL)
+                {
+                    LZ77_INFO("open output file failed.\n");
+                    goto failed; 
+                }
+                decode(bitF, file);
+            }
+            else
+            {
+                LZ77_PRINT("\033[31mError format: lz77 -m encode/decode <filename_in> <filename_out>. \033[0m\n"); 
+                return RT_ERROR; 
+            }
+        }
+        else if(!strcmp(argv[1], "-la"))
+        {
+            la_size = atoi(argv[2]);
+            if(la_size < MIN_LA_SIZE || la_size > MAX_LA_SIZE)
+            {
+                LZ77_INFO("set lookahead size failed range 2~255.\n"); 
+                goto failed; 
+            }
+        }
+        else if(!strcmp(argv[1], "-sb"))
+        {
+            sb_size = atoi(argv[2]); 
+            if(sb_size < MIN_SB_SIZE || la_size > MAX_SB_SIZE)
+            {
+                LZ77_INFO("set lookahead size failed range 1~65535.\n"); 
+                goto failed; 
+            }
+        }
+        else
+        {
+            LZ77_PRINT("\033[32mUsage: lz77 [-m] [-la] [sb] \033[0m\n");
+            LZ77_PRINT("Error arguments: \033[31m%s\033[0m. \n", argv[1]); 
+            goto failed; 
+        }
     }
     
-    //exit(EXIT_FAILURE);
-    return EXIT_FAILURE; 
-}
+    fclose(file);
+    bitIO_close(bitF);
+    return RT_EOK; 
 
-#include "finsh.h"
-MSH_CMD_EXPORT_ALIAS(lz77_main, lz77, Lempel Ziv Encoding and Decoding); 
+failed: 
+    if(file != RT_NULL)
+    {
+        fclose(file); 
+        file = RT_NULL; 
+    }
+    if(bitF != RT_NULL)
+    {
+        bitIO_close(bitF); 
+        file = RT_NULL; 
+    }
+    return RT_ERROR; 
+}
+MSH_CMD_EXPORT(lz77, Lempel Ziv Encoding and Decoding); 

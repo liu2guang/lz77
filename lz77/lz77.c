@@ -204,6 +204,7 @@ void decode(struct bitFILE *file, FILE *out)
         back++;
     }
 
+    free(buffer);
 }
 
 /***************************************************************************
